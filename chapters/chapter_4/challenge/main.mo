@@ -4,6 +4,14 @@ import HashMap "mo:base/HashMap";
 import Iter "mo:base/Iter";
 import Principal "mo:base/Principal";
 import Option "mo:base/Option";
+import Time "mo:base/Time";
+import Nat "mo:base/Nat";
+import Nat64 "mo:base/Nat64";
+import Hash "mo:base/Hash";
+import Text "mo:base/Text";
+import Int64 "mo:base/Int64";
+import Bool "mo:base/Bool";
+import Array "mo:base/Array";
 import Types "types";
 actor {
     // For this level we need to make use of the code implemented in the previous projects.
@@ -136,6 +144,12 @@ actor {
         return #ok();
     };
 
+    func _burn(owner : Principal, amount : Nat) : () {
+        let balance = Option.get(ledger.get(owner), 0);
+        assert balance > amount;
+        ledger.put(owner, balance - amount);
+    };
+
     public shared ({ caller }) func transfer(from : Principal, to : Principal, amount : Nat) : async Result<(), Text> {
         let balanceFrom = Option.get(ledger.get(from), 0);
         let balanceTo = Option.get(ledger.get(to), 0);
@@ -161,19 +175,123 @@ actor {
     /////////////////
     // PROJECT #4 //
     ///////////////
+    type ProposalStatus = Types.ProposalStatus;
+
+    stable var indexProposalId : Nat64 = 0;
+    let proposals = HashMap.HashMap<Nat64, Proposal>(0, Nat64.equal, Nat64.toNat32);
     public shared ({ caller }) func createProposal(content : ProposalContent) : async Result<ProposalId, Text> {
-        return #err("Not implemented");
+        if(Option.isNull(members.get(caller))){
+            return #err("Caller not a member");
+        };
+        let memberBalance = Option.get(ledger.get(caller), 0);
+        if(memberBalance < 1){
+            return #err("Insufficient amount of balance");
+        };
+
+        switch(await getMember(caller)){
+            case (#err(text)){
+                return #err("Member not Registered");
+            };
+            case(#ok(member)){
+                let proposal : Proposal = {
+                    id = indexProposalId;
+                    content = content;
+                    creator = caller;
+                    created = Time.now();
+                    executed = null;
+                    votes = [];
+                    voteScore = 0;
+                    status = #Open;
+                };
+                indexProposalId += 1;
+                proposals.put(proposal.id, proposal);
+                _burn(caller, 1);
+                return #ok(proposal.id);
+            };
+        };
     };
 
     public query func getProposal(proposalId : ProposalId) : async ?Proposal {
-        return null;
+        return proposals.get(proposalId);
     };
 
     public shared ({ caller }) func voteProposal(proposalId : ProposalId, yesOrNo : Bool) : async Result<(), Text> {
-        return #err("Not implemented");
+        if(Option.isNull(members.get(caller))){
+            return #err("Caller not a member");
+        };
+
+        switch(await getProposal(proposalId)){
+            case(null){
+                return #err("Proposal Not Found");
+            };
+            case(?proposal){
+                if(_hasVoted(proposal, caller))return #err("Member already Voted");
+                let newProposal = _newProposal(proposal, yesOrNo, caller);
+                proposals.put(proposalId, newProposal);
+
+                return #ok();
+                
+
+            };
+        };
     };
 
     public query func getAllProposals() : async [Proposal] {
-        return [];
+        return Iter.toArray(proposals.vals());
     };
+
+    private func _hasVoted(proposal: Proposal, principal : Principal) : Bool{
+        for(voter in proposal.votes.vals()){
+            if(voter.member == principal)return true;
+        };
+        return false;
+    };
+
+    private func _newProposal(oldProposal : Proposal, voice : Bool, voter : Principal) : Proposal{
+        let multiplier = switch(voice){
+            case(true) {1};
+            case(false) {-1};
+        };
+        let votePower = Option.get(ledger.get(voter), 0);
+        let newVoteScore = oldProposal.voteScore + (votePower * multiplier);
+        let newStatus = _decideStatus(newVoteScore);
+        let executedStatus : ?Time.Time = if(newStatus != #Open){
+            ?Time.now();
+        }
+        else{
+            null;
+        };
+        
+        let newProposal : Proposal = {
+            id = oldProposal.id;
+            content = oldProposal.content;
+            creator = oldProposal.creator;
+            created = oldProposal.created;
+            executed = executedStatus;
+            votes = Array.append(oldProposal.votes, [_newVote(voter, voice, votePower)]);
+            voteScore = newVoteScore;
+            status = newStatus;
+        };
+
+        return newProposal;
+    };
+
+    private func _newVote(voter : Principal, voice : Bool, votePower : Nat) : Vote{
+        let vote : Vote = {
+            member = voter;
+            votingPower = votePower;
+            yesOrNo = voice;
+        };
+        return vote;
+    };
+
+    private func _decideStatus(score : Int) : ProposalStatus{
+        if(score >= 100){
+            return #Accepted;
+        }
+        else if(score <= -100){
+            return #Rejected;
+        }
+        else return #Open;
+    }
 };
